@@ -14,6 +14,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
 import com.renamer.app.databinding.ActivityMainBinding
@@ -64,6 +65,13 @@ class MainActivity : AppCompatActivity() {
         adapter = PhotoAdapter(contentResolver, lifecycleScope) { updateSelectionCount() }
         binding.recycler.layoutManager = GridLayoutManager(this, 3)
         binding.recycler.adapter = adapter
+
+        // Restore the last used name format and keep it saved as it changes.
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        prefs.getString(KEY_FORMAT, null)?.let { binding.formatInput.setText(it) }
+        binding.formatInput.doAfterTextChanged { text ->
+            prefs.edit().putString(KEY_FORMAT, text?.toString().orEmpty()).apply()
+        }
 
         binding.selectAll.setOnClickListener { adapter.setAllSelected(true) }
         binding.selectNone.setOnClickListener { adapter.setAllSelected(false) }
@@ -141,22 +149,38 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** Maps each selected item to its target file name, resolving collisions. */
+    /**
+     * Maps each selected item to its target file name. When more than one
+     * selected photo resolves to the same base name, every one of them (the
+     * first included) gets a number appended with no space: name1, name2, ...
+     * Names that are unique within the selection are left without a number.
+     */
     private fun computeNewNames(
         template: String,
         selected: List<MediaItem>
     ): List<Pair<Uri, String>> {
-        val used = HashSet<String>()
-        return selected.map { item ->
+        val bases = selected.map { NameFormatter.format(template, it.dateTaken) }
+
+        // How many selected photos share each base name (case-insensitive).
+        val totals = HashMap<String, Int>()
+        bases.forEach { base ->
+            val key = base.lowercase()
+            totals[key] = (totals[key] ?: 0) + 1
+        }
+
+        val seen = HashMap<String, Int>()
+        return selected.mapIndexed { index, item ->
             val ext = NameFormatter.extensionOf(item.displayName)
-            val base = NameFormatter.format(template, item.dateTaken)
-            var candidate = withExt(base, ext)
-            var counter = 1
-            while (!used.add(candidate.lowercase())) {
-                candidate = withExt(base + " (" + counter + ")", ext)
-                counter++
+            val base = bases[index]
+            val key = base.lowercase()
+            val name = if ((totals[key] ?: 0) > 1) {
+                val n = (seen[key] ?: 0) + 1
+                seen[key] = n
+                withExt(base + n, ext)
+            } else {
+                withExt(base, ext)
             }
-            item.uri to candidate
+            item.uri to name
         }
     }
 
@@ -199,5 +223,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun toast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    companion object {
+        private const val PREFS = "renamer_prefs"
+        private const val KEY_FORMAT = "name_format"
     }
 }
